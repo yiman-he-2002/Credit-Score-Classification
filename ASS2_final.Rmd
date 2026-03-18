@@ -1,0 +1,1083 @@
+---
+title: "5003ASS2"
+author: "W04G06"
+output:
+  html_document: 
+    code_folding: hide
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  results = 'hide',
+  cache = TRUE
+)
+```
+
+```{=html}
+<style>
+p {
+  text-align: justify;
+}
+</style>
+```
+
+```{r}
+# Load libraries
+# Data manipulation
+library(readr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(tidyverse)
+
+# Visualization
+library(ggplot2)
+library(ggthemes)
+library(corrplot)
+
+# Modeling and ML frameworks
+library(caret)
+library(rsample)
+library(tidymodels)
+library(themis)  # for dealing with class imbalance
+library(e1071)
+library(randomForest)
+library(ranger)
+library(tree)
+library(gbm)
+library(xgboost)
+library(nnet)
+library(glmnet)
+library(MASS)
+
+# Evaluation
+library(MLmetrics)
+library(pROC)
+
+# File path
+library(here)
+```
+The following content is provided by `W04G06` based on the **"Credit score classification"** dataset available on **Kaggle**.
+
+## Problem Overview
+In today's world, credit payment is an important part of modern consumer behavior. It provides consumers with more optional payment schemes and is widely used in house purchase, car purchase, and other daily transaction activities. However, while credit payment brings many conveniences to consumers, it also poses inevitable risks to financial institutions such as commercial banks. Because of this, credit ratings are widely used.
+
+They help financial institutions dynamically identify high-risk customers, avoid over-crediting them, or reject providing loans to them, thereby reducing potential bad debt losses. Credit ratings can also assist in implementing differentiated pricing and hierarchical marketing strategies. For example, offering low interest rates and high credit limits to users with good credit, and charging higher interest rates or service fees to users with poor credit to cover potential risk costs. In these ways, credit ratings enable financial institutions to optimize the efficiency of capital use.
+
+Since financial institutions are generally required to set aside provisions to cover potential losses, the reserve ratio for high-quality loans is lower than that for subprime loans. Increasing the proportion of high-quality loans can reduce the capital occupation of financial institutions. Therefore, we aim to build classification models to accurately classify the credit ratings of customers based on their credit-related information collected in the dataset.
+
+## Dataset Description
+
+The dataset used in this project was sourced from Kaggle, containing credit-related information and some bank details. It includes **12 categorical features** and **16 numerical features**.
+
+The dataset had a significant amount of missing values, unaligned fields, and inconsistent entries. We handled these issues by either replacing them with actual data or removing affected rows, as the dataset size was sufficiently large.
+
+Our dataset meets **three major challenges**:
+- **Large size** (originally 100,000 observations, subset to 20,000),
+- **Missingness** (requiring extensive cleaning and preprocessing),
+- **Multi-class classification**, with the target variable **Credit_Score** consisting of **three categories**: `Good`, `Standard`, and `Poor`.
+
+#### Data Cleaning
+During the data cleaning process, we adopted multiple imputation strategies for missing values:
+
+- For most **numeric variables** (such as `Monthly_Inhand_Salary`, `Num_Credit_Inquiries`, `Monthly_Balance`, etc.), we used the **median** to fill missing values. This avoids the influence of outliers on the mean and improves model stability.
+- The placeholder `'_'` in **categorical variables** such as `Credit_Mix` was replaced with the most frequent category.
+- For `Occupation`, we grouped and filled missing values using the **mode** in combination with the historical records of each customer to maintain consistency within the same customer’s data.
+- The variable `Credit_History_Age` was parsed into months, and missing values were filled with the **median** to ensure comparability in the time dimension.
+
+In terms of **outlier handling**:
+
+- All numeric variables (except `Age`) were evaluated using the **IQR method**. Any value exceeding **1.5 times the interquartile range** from the upper or lower quartile was treated as an outlier, and the corresponding row was removed.
+- For `Age`, we applied domain knowledge and limited valid values between `1` and `100`. Records outside this range were also treated as exceptions.
+
+This strategy, which combines statistical methods with domain-informed rules, effectively improved data quality and enhanced the robustness of the model.
+```{r, include=FALSE}
+#read dataset
+train <- read.csv("credit score.csv", stringsAsFactors = TRUE)
+```
+
+```{r}
+#pre-processing
+dim(train)
+colSums(is.na(train))
+```
+```{r}
+train <- dplyr::select(train, -Name, -SSN, -ID, -Type_of_Loan)
+```
+
+```{r}
+#convert to numeric
+convert_to_numeric <- function(x) {
+  as.numeric(gsub("[^0-9.]", "", x))  # Remove non-numeric characters and convert
+}
+
+convert_cols <- c(
+  "Age", "Annual_Income", "Num_of_Loan", "Num_of_Delayed_Payment",
+  "Changed_Credit_Limit", "Outstanding_Debt",
+  "Amount_invested_monthly", "Monthly_Balance"
+)
+
+# Apply conversion
+for (col in convert_cols) {
+  train[[col]] <- convert_to_numeric(train[[col]])
+}
+```
+
+```{r}
+#Convert Credit_History_Age to numeric
+credit_age_to_num <- function(x) {
+  years <- as.numeric(str_extract(x, "\\d+(?=\\sYears)"))
+  months <- as.numeric(str_extract(x, "\\d+(?=\\sMonths)"))
+  ifelse(is.na(years), NA, years * 12 + ifelse(is.na(months), 0, months))
+}
+
+train$Credit_History_Age <- credit_age_to_num(train$Credit_History_Age)
+
+# Fill missing
+train$Credit_History_Age[is.na(train$Credit_History_Age)] <- median(train$Credit_History_Age, na.rm = TRUE)
+```
+
+```{r}
+#Fill missing numeric values with median
+numeric_cols <- c("Monthly_Inhand_Salary", "Num_Credit_Inquiries",
+                  "Amount_invested_monthly", "Monthly_Balance",
+                  "Credit_History_Age", "Num_of_Delayed_Payment",
+                  "Changed_Credit_Limit")  
+for (col in numeric_cols) {
+  if (col %in% names(train)) {
+    train[[col]][is.na(train[[col]])] <- median(train[[col]], na.rm = TRUE)
+  }
+}
+```
+
+```{r}
+# Replace "_" with most frequent value
+rep_val <- names(sort(table(train$Credit_Mix), decreasing = TRUE))[1]
+train$Credit_Mix[train$Credit_Mix == "_"] <- rep_val
+```
+
+```{r}
+get_mode <- function(x) {
+  ux <- na.omit(unique(x))
+  if (length(ux) == 0) return("Unknown") 
+  ux[which.max(tabulate(match(x, ux)))]
+}
+target_cols <- c("Age", "Num_Bank_Accounts", "Num_Credit_Card", "Interest_Rate","Monthly_Inhand_Salary","Num_of_Loan")
+train <- train %>%
+  group_by(Customer_ID) %>%
+  mutate(across(all_of(target_cols), ~ ifelse(n_distinct(na.omit(.)) > 1, get_mode(.), .))) %>%
+  ungroup()
+```
+
+```{r}
+train$Occupation <- trimws(train$Occupation)
+train$Occupation[train$Occupation %in% c("", "_", "_______")] <- NA
+
+# Custom mode function (returns "Unknown" if all values are NA)
+get_mode <- function(x) {
+  ux <- na.omit(unique(x))
+  if (length(ux) == 0) return("Unknown")
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+# Apply mode imputation for Occupation grouped by Customer_ID
+train <- train %>%
+  group_by(Customer_ID) %>%
+  mutate(Occupation = ifelse(n_distinct(na.omit(Occupation)) > 1 || any(is.na(Occupation)),
+                             get_mode(Occupation),
+                             Occupation)) %>%
+  ungroup()
+```
+```{r}
+# Define valid categories for Payment_Behaviour
+valid_payment_behaviours <- c(
+  "Low_spent_Small_value_payments",
+  "Low_spent_Large_value_payments",
+  "High_spent_Small_value_payments",
+  "High_spent_Large_value_payments"
+)
+
+# Remove rows where Payment_Behaviour is not in the valid set
+train <- train[train$Payment_Behaviour %in% valid_payment_behaviours, ]
+```
+```{r,results='markup'}
+# Select numeric columns
+numeric_cols <- train %>%
+  select(where(is.numeric))
+
+# Convert to long format
+long_data_all <- numeric_cols %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+
+# Add log-transformed value (log10 + 1 to handle 0s)
+# Add log-transformed value safely (ignore negative and NA values)
+long_data_all <- long_data_all %>%
+  mutate(Log_Value = ifelse(Value >= 0, log10(Value + 1), NA))
+
+
+# Plot faceted boxplots using log-transformed values
+ggplot(long_data_all, aes(x = "", y = Log_Value)) +
+  geom_boxplot(outlier.color = "red", fill = "skyblue", color = "darkblue") +
+  facet_wrap(~ Variable, scales = "free_y", ncol = 3) +  # independent y-axis scale
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  labs(
+    title = "Individual Boxplots of Numeric Variables (Log10 Transformed)",
+    x = NULL,
+    y = "log10(Value + 1)"
+  )
+```
+
+```{r}
+# Custom outlier detection function using IQR
+is_outlier <- function(x) {
+  if (!is.numeric(x)) return(rep(FALSE, length(x)))
+  q1 <- quantile(x, 0.25, na.rm = TRUE)
+  q3 <- quantile(x, 0.75, na.rm = TRUE)
+  iqr <- q3 - q1
+  return(x < (q1 - 1.5 * iqr) | x > (q3 + 1.5 * iqr))
+}
+
+# Mark outliers in all numeric columns (excluding Age for separate rule)
+numeric_cols <- sapply(train, is.numeric)
+numeric_colnames <- names(train)[numeric_cols & names(train) != "Age"]
+
+# Create a logical mask for outliers
+outlier_mask <- rep(FALSE, nrow(train))
+
+for (col in numeric_colnames) {
+  outlier_mask <- outlier_mask | is_outlier(train[[col]])
+}
+
+# Add rule for Age specifically: <1 or >100 is considered outlier
+outlier_mask <- outlier_mask | train$Age < 1 | train$Age > 100
+# Remove rows with any outliers
+train <- train[!outlier_mask, ]
+```
+
+```{r}
+write.csv(train, "train_cleaned_final0.csv", row.names = FALSE)
+```
+## Exploratory Data Analysis
+
+#### Global Data Overview
+
+To begin, we import and summarize the training dataset. This step provides a general understanding of the data shape, data types, and the ranges of each feature. The overview helps identify the presence of categorical versus numerical variables.
+
+#### Data Type Classification Analysis
+
+After cleaning and preparing, the number of numeric variables is 17, and that of categorical variables is 7. Further exploration and visualization are based on these variables.
+
+```{r}
+
+train_data <- read.csv("train_cleaned_final.csv")
+var_types <- sapply(train_data, class)
+
+cat_vars <- names(var_types[var_types %in% c("character", "factor")])
+num_vars <- names(var_types[var_types %in% c("numeric", "integer")])
+
+```
+
+#### Classification Target Distribution
+
+```{r,fig.width=6, fig.height=4}
+library(ggplot2)
+library(dplyr)
+
+
+# --- Visualization ---
+train_data %>%
+  filter(!is.na(Credit_Score) & Credit_Score != "") %>% # Remove missing/empty values
+  count(Credit_Score) %>% # Get counts for each category
+  ggplot(aes(x = reorder(Credit_Score, -n), y = n, fill = Credit_Score)) + # Order bars by count
+  geom_bar(stat = "identity", color = "black", alpha = 0.8) +
+  geom_text(aes(label = n), vjust = -0.5, size = 3.5) + # Add count labels
+  scale_y_continuous(labels = scales::comma) + # Format y-axis numbers
+  labs(title = "Distribution of Customer Credit Scores",
+       x = "Credit Score Category",
+       y = "Number of Customers") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+Customers' credit_score is the classification target. The distribution of customer credit scores displays three categories: Standard, Poor, and Good. There's a notable class imbalance, for 10,845 records are Standard score. Poor credit scores account for 5,955 customers, while 3,200 records are Good.
+
+#### Numerical Variables Analysis
+
+This boxplot shows that individuals with a Poor credit score tend to have a higher number of loans, while those with a Good score have fewer. The clear median differences and wider spread suggest that the number of loans is meaningfully associated with credit score classification and warrants further investigation.
+
+```{r}
+# Boxplot of Num_of_Loan by Credit_Score
+ggplot(train_data, aes(x = Credit_Score, y = Num_of_Loan, fill = Credit_Score)) +
+  geom_boxplot() +
+  labs(title = "Number of Loans by Credit Score", x = "Credit Score", y = "Number of Loans") +
+  theme_minimal()
+
+
+
+
+numeric_vars <- names(train_data)[sapply(train_data, is.numeric)]
+
+# Apply Kruskal-Wallis test for each numeric variable vs Credit_Score
+kruskal_results <- sapply(numeric_vars, function(var) {
+  kruskal.test(train_data[[var]] ~ train_data$Credit_Score)$p.value
+})
+```
+
+Following output shows p-values from Kruskal-Wallis tests comparing each numerical variable across credit score groups. A p-value near 0 indicates a statistically significant difference, meaning that variable varies meaningfully by credit score which can be used in further modelling.
+
+<details>
+  <summary>Output</summary>
+  ```{r,echo=FALSE, eval=TRUE}
+  # View sorted p-values
+  sort(kruskal_results)
+  ```
+  </details>
+```{r}
+
+kruskal_df <- data.frame(
+  Variable = names(kruskal_results),
+  P_Value = as.numeric(kruskal_results)
+)
+
+
+kruskal_df <- kruskal_df[order(kruskal_df$P_Value), ]
+
+library(ggplot2)
+
+kruskal_df$NegLogP <- -log10(kruskal_df$P_Value)
+
+ggplot(kruskal_df, aes(x = reorder(Variable, NegLogP), y = NegLogP)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Variable Significance from Kruskal-Wallis Test",
+       x = "Numeric Variables", y = "-log10(p-value)") +
+  theme_minimal()
+
+```
+
+
+The chart presents the statistical association strength between each numerical variable and the credit score categories based on the Kruskal-Wallis test. The horizontal axis shows the negative log of the p-value (-log10(p-value)), where higher values indicate stronger differences among credit score groups. Variables such as Age, Credit_History_Age, and Credit_Utilization_Ratio exhibit significant discriminative power and are recommended as priority features for modeling.
+
+#### Categorical Variables Analysis
+
+We compute Cramér’s V values among all categorical variables to quantify pairwise associations.
+
+```{r}
+packages <- c("tidyverse", "vcd", "ggpubr", "reshape2", "gridExtra")
+new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+
+library(tidyverse)
+library(vcd)
+library(ggpubr)
+library(reshape2)
+library(gridExtra)
+
+train_data <- read.csv("train_cleaned_final.csv")
+
+train_data$Credit_Score <- as.factor(train_data$Credit_Score)
+
+char_vars <- names(train_data)[sapply(train_data, is.character)]
+num_vars  <- names(train_data)[sapply(train_data, is.numeric)]
+
+
+kruskal_results <- list()
+cramer_results <- list()
+boxplots <- list()
+
+# （Kruskal-Wallis）
+for (var in num_vars) {
+  formula <- as.formula(paste(var, "~ Credit_Score"))
+  result <- kruskal.test(formula, data = train_data)
+  kruskal_results[[var]] <- result$p.value
+  
+  p <- ggboxplot(train_data, x = "Credit_Score", y = var, 
+                 color = "Credit_Score", palette = "jco",
+                 title = paste("Boxplot of", var, "by Credit Score"))
+  boxplots[[var]] <- p
+}
+
+#（Cramér's V）
+for (cat_var in char_vars) {
+  if (cat_var != "Customer_ID" & cat_var != "Month") {
+    tbl <- table(train_data[[cat_var]], train_data$Credit_Score)
+    stat <- assocstats(tbl)
+    cramer_results[[cat_var]] <- stat$cramer
+  }
+}
+
+
+
+cramer_df <- data.frame(Variable = names(cramer_results), Cramer_V = unlist(cramer_results))
+ggplot(cramer_df, aes(x = reorder(Variable, Cramer_V), y = Cramer_V)) +
+  geom_bar(stat = "identity", fill = "#69b3a2") +
+  coord_flip() +
+  labs(title = "Cramér's V Between Categorical Variables and Credit_Score",
+       x = "Variable", y = "Cramér's V") +
+  theme_minimal()
+
+```
+
+The bar chart presents the strength of association between the selected categorical variables and Credit_Score using Cramér’s V. Among the variables, Credit_Mix and Payment_of_Min_Amount show the strongest relationships with credit score classification, suggesting their high predictive value. In contrast, Occupation exhibits relatively low association, indicating it may contribute less in modeling unless enhanced or re-encoded.
+
+#### Insight and Conclusion
+For numerical variables, we evaluate their statistical significance with the target variable using the Kruskal-Wallis test. Variables with small p-values (e.g., Outstanding_Debt, Num_of_Loan) are retained, while less informative ones can be excluded or reconsidered. For models like Logistic Regression, k-NN, SVM, and LDA/QDA, numeric variables should be standardized using scale() to ensure uniform contribution. Categorical variables are assessed using Cramér’s V; those with high association scores (e.g., Credit_Mix, Payment_of_Min_Amount) are encoded using one-hot encoding via model.matrix() or caret::dummyVars(). Tree-based models are more flexible and can often handle raw categorical data without encoding or scaling. This structured preprocessing pipeline ensures the modeling dataset is statistically sound, interpretable, and compatible with the assumptions of different machine learning algorithms.
+
+## Plan for Evaluation
+
+Although there are many evaluation metrics available for classification models—such as **Accuracy**, **Precision**, **Recall**, **F1 Score**, and **AUC**—we need to pick methods that actually make sense for the dataset and align with business priorities.
+
+#### Dataset Characteristics
+
+In our dataset, the target variable `Credit_Score` shows a moderate class imbalance, with an approximate distribution of:
+
+-   **Good**: 16%
+-   **Standard**: 54%
+-   **Poor**: 30%
+
+Given this imbalance, **Accuracy** is not a reliable metric. A model that simply predicts the majority class (`Standard`) could still present fairly high accuracy while performing poorly on the minority classes (`Good` and `Poor`).
+
+#### Business Priorities
+
+From a business perspective, we particularly focus on the model’s ability to:
+
+-   **Recall for the “Good” and “Poor” classes**: This helps minimize the risk of missing out on potentially high-value customers (`Good`) or failing to identify high-risk individuals (`Poor`).
+-   **Precision for the “Good” class**: This is essential to avoid wasting financial resources on a fake high-value customer.
+
+#### Evaluation Metrics
+
+In light of this, our model evaluation will emphasize:
+
+-   **Recall** and **Precision** for key classes (`Good` and `Poor`), as these directly address business needs.
+-   **F1 Score** as a balanced summary metric, combining Precision and Recall.
+-   **AUC** to assess the model’s overall discriminative ability across all classes.
+
+By focusing on these metrics, we ensure the evaluation reflects both the dataset’s characteristics and the business objectives.
+
+## Classification Models Used
+
+With the dataset, we propose five classification models to classify the credit ratings of customers.
+```{r}
+df <- read_csv("train_cleaned_final.csv")
+
+#Drop irrelevant columns
+df <- df %>%
+  select(-c(Customer_ID, Month))
+
+#Split data into training and test sets (80/20 stratified split)
+set.seed(5003)
+train_index <- createDataPartition(df$Credit_Score, p = 0.8, list = FALSE)
+df_train <- df[train_index, ]
+df_test  <- df[-train_index, ]
+
+#Separate features and target for training set
+y_train <- as.factor(df_train$Credit_Score)
+X_train <- df_train %>% select(-Credit_Score)
+
+#One-hot encode categorical variables on training data
+X_encoder <- dummyVars("~ .", data = X_train)
+X_train_encoded <- predict(X_encoder, newdata = X_train) %>% as.data.frame()
+
+#Standardize training data
+preproc <- preProcess(X_train_encoded, method = c("center", "scale"))
+X_train_scaled <- predict(preproc, newdata = X_train_encoded)
+
+#Prepare test set: same encoding and scaling
+X_test <- df_test %>% select(-Credit_Score)
+y_test <- as.factor(df_test$Credit_Score)
+
+X_test_encoded <- predict(X_encoder, newdata = X_test) %>% as.data.frame()
+X_test_scaled <- predict(preproc, newdata = X_test_encoded)
+```
+
+
+### Linear & Quadratic Discriminant Analysis
+
+```{r}
+data = read.csv('train_cleaned_final.csv')
+
+# dummy variables for categorical features
+data <- subset(data, select = -Customer_ID)
+data <- subset(data, select = -Month)
+
+# Create dummy variables (one-hot encoding) for categorical features
+dummies <- dummyVars(Credit_Score ~ ., data = data, fullRank = TRUE)
+data_transformed <- data.frame(predict(dummies, newdata = data))
+
+# Add the response variable back
+data_transformed$Credit_Score <- as.factor(data$Credit_Score)
+
+## Split train and test set
+set.seed(5003)
+train_index <- createDataPartition(data_transformed$Credit_Score, p = 0.8, list = FALSE)
+qda_train_data <- data_transformed[train_index, ]
+qda_test_data <- data_transformed[-train_index, ]
+
+## remove low-variance and highly correlated features
+
+# Remove NZV
+nzv <- nearZeroVar(qda_train_data, saveMetrics = TRUE)
+qda_train_data <- qda_train_data[, !nzv$nzv]
+nzv_cols <- rownames(nzv[nzv$nzv == TRUE, ])
+
+# Remove same NZV columns from test data
+qda_test_data <- qda_test_data[, !(names(qda_test_data) %in% nzv_cols)]
+
+# Remove multicollinearity from train
+high_corr <- findCorrelation(cor(qda_train_data[, -ncol(qda_train_data)]), cutoff = 0.9)
+qda_train_data <- qda_train_data[, -high_corr]
+
+# Remove same correlated columns from test
+qda_test_data <- qda_test_data[, names(qda_train_data)]
+
+# Apply SMOTE using a recipe
+recipe_smote <- recipe(Credit_Score ~ ., data = qda_train_data) %>%
+  step_smote(Credit_Score)
+
+# Prep and bake the recipe
+train_balanced <- prep(recipe_smote) %>%
+  bake(new_data = NULL)
+
+# Scale
+qda_preproc <- preProcess(train_balanced[, -ncol(train_balanced)], method = c("center", "scale"))
+qda_X_train_scaled <- predict(qda_preproc, train_balanced[, -ncol(train_balanced)])
+qda_X_test_scaled <- predict(qda_preproc, qda_test_data[, -ncol(qda_test_data)])
+
+# Add back response variable
+qda_y_train <- train_balanced$Credit_Score
+qda_y_test <- qda_test_data$Credit_Score
+qda_train_data <- cbind(qda_X_train_scaled, Credit_Score = qda_y_train)
+qda_test_data <- cbind(qda_X_test_scaled, Credit_Score = qda_y_test)
+```
+
+**Linear & Quadratic Discriminant Analysis** is a method that can estimate the characteristics of each credit score category using different assumptions.(Ji & Xie, n.d.). We checked for near-zero variance and multicollinearity before applying LDA or QDA, because both algorithms rely on the estimation and inversion of covariance matrices, which require stable and informative predictors. We also addressed class imbalance using **SMOTE (Synthetic Minority Over-sampling Technique)** to ensure that the model does not become biased toward the majority class.
+
+
+#### 10-Fold Cross-Validation for LDA and QDA
+```{r}
+
+set.seed(5003)  # for reproducibility
+
+## LDA
+# Set up 10-fold cross-validation
+qda_ctrl <- trainControl(method = "cv", number = 10)
+
+# Train QDA model with cross-validation
+lda_cv_model <- train(Credit_Score ~ ., 
+                      data = qda_train_data, 
+                      method = "lda", 
+                      trControl = qda_ctrl)
+
+# Print CV results
+lda_results <- lda_cv_model$results[, c("Accuracy", "Kappa")]
+
+
+## QDA
+# Set up 10-fold cross-validation
+qda_ctrl <- trainControl(method = "cv", number = 10)
+
+# Train QDA model with cross-validation
+qda_cv_model <- train(Credit_Score ~ ., 
+                      data = qda_train_data, 
+                      method = "qda", 
+                      trControl = qda_ctrl)
+
+# Print CV results
+qda_results <- qda_cv_model$results[, c("Accuracy", "Kappa")]
+
+
+# Combine into one data frame
+comparison_df <- data.frame(
+  Metric = c("Accuracy", "Kappa"),
+  LDA = c(round(lda_results$Accuracy, 4), round(lda_results$Kappa, 4)),
+  QDA = c(round(qda_results$Accuracy, 4), round(qda_results$Kappa, 4))
+)
+
+# Show side-by-side table
+knitr::kable(comparison_df, caption = "LDA vs QDA Cross-Validation Metrics")
+```
+
+We applied 10-fold cross validation on both LDA and QDA models on the training set. The accuracy and kappa score for both models are similar, but QDA outperforms a little bit. So we choose QDA to train the model and test on the test set.
+
+
+#### PCA: class boundaries
+```{r}
+library(ggplot2)
+
+# Run PCA
+pca_result <- prcomp(qda_X_train_scaled, center = TRUE, scale. = TRUE)
+pca_df <- data.frame(PC1 = pca_result$x[, 1],
+                     PC2 = pca_result$x[, 2],
+                     Credit_Score = qda_y_train)
+
+# Create plot
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Credit_Score)) +
+  geom_point(alpha = 0.6) +
+  labs(title = "PCA of Features Colored by Class")
+
+# The nonlinear and overlapping class boundaries justify using QDA, which allows quadratic (curved) boundaries
+```
+
+The PCA plot shows that the data has non-linear and overlapping class boundaries. Since QDA can model quadratic boundaries while LDA is limited to linear boundaries, QDA is likely a more suitable choice than LDA for this dataset.
+
+
+#### Final QDA model with LASSO
+LASSO (Least Absolute Shrinkage and Selection Operator) is applied to perform feature selection by shrinking the coefficients of less important (or insignificant) features to exactly zero, thereby removing them from the model.
+We used cv.glmnet() and family = "multinomial", which is for multi-class classification, to perform LASSO regression with cross-validation. The cross-validation selects the best regularization parameter (λ) to minimize classification error.
+We extracted the coefficients of the model at lambda.1se, and identified the features with non-zero coefficients.
+Three features are removed after LASSO is applied.
+```{r}
+# Lasso for feature selection
+X <- as.matrix(qda_X_train_scaled)
+y <- qda_y_train
+
+set.seed(5003)
+cv_lasso <- cv.glmnet(X, y, alpha = 1, family = "multinomial")
+plot(cv_lasso)
+title("LASSO Cross-Validation Curve (Multinomial)\n")
+# it visualizes how the model's cross-validation error changes with different levels of regularization (lambda)
+
+lasso_coef <- coef(cv_lasso, s = "lambda.1se")
+selected_features <- unique(unlist(lapply(lasso_coef, function(class_coef) {
+  rownames(class_coef)[which(class_coef != 0)]
+})))
+selected_features <- setdiff(selected_features, "(Intercept)")
+
+cat(
+  "Original number of features:", length(qda_X_train_scaled), "\n",
+  "Number of features after LASSO:", length(selected_features), "\n"
+)
+
+# Subset data
+qda_X_train_lasso <- qda_X_train_scaled[, selected_features]
+qda_X_test_lasso <- qda_X_test_scaled[, selected_features]
+
+# QDA model on selected features
+qda_model_lasso <- qda(x = qda_X_train_lasso, grouping = qda_y_train)
+qda_pred_lasso <- predict(qda_model_lasso, newdata = qda_X_test_lasso)
+
+# Evaluation
+qda_conf_matrix_lasso <- confusionMatrix(qda_pred_lasso$class, qda_y_test)
+qda_cm_table_lasso <- qda_conf_matrix_lasso$table
+
+# Metrics
+qda_recall_lasso <- diag(qda_cm_table_lasso) / colSums(qda_cm_table_lasso)
+qda_precision_lasso <- diag(qda_cm_table_lasso) / rowSums(qda_cm_table_lasso)
+qda_f1_lasso <- 2 * qda_precision_lasso * qda_recall_lasso / (qda_precision_lasso + qda_recall_lasso)
+
+qda_y_prob_lasso <- qda_pred_lasso$posterior
+qda_y_true_lasso <- factor(qda_y_test, levels = colnames(qda_y_prob_lasso))
+qda_auc_lasso <- as.numeric(multiclass.roc(response = qda_y_true_lasso, predictor = as.matrix(qda_y_prob_lasso))$auc)
+
+macro_qda_recall <- mean(qda_recall_lasso, na.rm = TRUE)
+macro_qda_precision <- mean(qda_precision_lasso, na.rm = TRUE)
+macro_qda_f1 <- mean(qda_f1_lasso, na.rm = TRUE)
+# Print
+cat(
+  "Final QDA with LASSO\n",
+  "Macro QDA_Recall   :", round(macro_qda_recall, 4), "\n",
+  "Macro QDA_Precision:", round(macro_qda_precision, 4), "\n",
+  "Macro QDA_F1 Score :", round(macro_qda_f1, 4), "\n",
+  "Macro QDA_AUC      :", round(qda_auc_lasso, 4), "\n"
+)
+```
+
+#### QDA model on traininng set
+We evaluated how well the QDA model performs on the training set. This is useful to compare with the test set performance and check for signs of overfitting or underfitting.
+
+```{r}
+qda_pred_train <- predict(qda_model_lasso, newdata = qda_X_train_lasso)
+qda_conf_matrix_train <- confusionMatrix(qda_pred_train$class, qda_y_train)
+qda_cm_table_train <- qda_conf_matrix_train$table
+
+qda_recall_per_class_train <- diag(qda_cm_table_train) / colSums(qda_cm_table_train)
+qda_precision_per_class_train <- diag(qda_cm_table_train) / rowSums(qda_cm_table_train)
+qda_f1_per_class_train <- 2 * qda_precision_per_class_train * qda_recall_per_class_train / 
+                (qda_precision_per_class_train + qda_recall_per_class_train)
+# AUC 
+qda_y_prob_train <- qda_pred_train$posterior
+qda_y_true_train <- factor(qda_y_train, levels = colnames(qda_y_prob_train))
+qda_multi_roc_train <- multiclass.roc(response = qda_y_true_train, predictor = as.matrix(qda_y_prob_train))
+qda_auc_value_train <- as.numeric(qda_multi_roc_train$auc)
+# Macro averages
+macro_qda_recall_train <- mean(qda_recall_per_class_train, na.rm = TRUE)
+macro_qda_precision_train <- mean(qda_precision_per_class_train, na.rm = TRUE)
+macro_qda_f1_train <- mean(qda_f1_per_class_train, na.rm = TRUE)
+
+cat(
+  "Training set QDA\n",
+  "Macro QDA_Recall   :", round(macro_qda_recall_train, 4), "\n",
+  "Macro QDA_Precision:", round(macro_qda_precision_train, 4), "\n",
+  "Macro QDA_F1 Score :", round(macro_qda_f1_train, 4), "\n",
+  "Macro QDA_AUC      :", round(qda_auc_value_train, 4), "\n"
+)
+```
+These metrics show similar value compared with the performance on the testing set, indicating there is no overfitting or underfitting occured.
+
+
+### k-Nearest Neighbours
+In this task, the model I chose is the **k-Nearest Neighbors (kNN)** classifier. kNN is a classic non-parametric classification algorithm in statistics. The choice of the number of neighbors, `k`, has a direct and significant impact on model performance.
+
+This experiment used a **grid search strategy** with three representative values of `k = 3`, `k = 5`, and `k = 10`, corresponding to small, medium, and large neighborhood sizes.  
+
+- A **smaller `k`** (e.g., `k = 3`) makes the model more sensitive to local structures and better at capturing fine-grained differences, but it may be more susceptible to noise, leading to **overfitting**.  
+- A **larger `k`** (e.g., `k = 10`) results in a smoother model with greater robustness but can cause **underfitting**.  
+- `k = 5` provides a balance between bias and variance and is often used as a default or baseline value.
+
+The goal of this tuning was to find the value of `k` that achieves the best generalization performance on the test set.
+
+```{r,echo=TRUE}
+# Train kNN classifier
+# Define the grid of k values to try
+knn_grid <- expand.grid(k = c(3, 5, 10)) 
+
+# Define training control with 5-fold cross-validation
+ctrl <- trainControl(method = "cv", number = 5)
+
+# Train the KNN model
+set.seed(5003)
+knn_model <- train(
+  x = X_train_scaled,
+  y = y_train,
+  method = "knn",
+  trControl = ctrl,
+  tuneGrid = knn_grid,
+  metric = "Accuracy"
+)
+# Evaluate 
+y_pred <- predict(knn_model, newdata = X_test_scaled)
+
+# Generate confusion matrix and accuracy
+conf_matrix <- confusionMatrix(y_pred, y_test)
+conf_matrix
+
+# Extract confusion matrix table
+cm_table <- conf_matrix$table
+
+# 1. Per-class recall (sensitivity)
+recall_per_class <- diag(cm_table) / colSums(cm_table)
+
+# 2. Per-class precision
+precision_per_class <- diag(cm_table) / rowSums(cm_table)
+
+# 3. F1 per class
+f1_per_class <- 2 * precision_per_class * recall_per_class / 
+                (precision_per_class + recall_per_class)
+
+# 4.AUC
+y_prob <- predict(knn_model, newdata = X_test_scaled, type = "prob")
+y_true <- factor(y_test, levels = colnames(y_prob))
+multi_roc <- multiclass.roc(response = y_true, predictor = as.matrix(y_prob))
+auc_value <- as.numeric(multi_roc$auc)
+
+
+# 4. Macro averages
+macro_knn_recall <- mean(recall_per_class, na.rm = TRUE)
+macro_knn_precision <- mean(precision_per_class, na.rm = TRUE)
+macro_knn_f1 <- mean(f1_per_class, na.rm = TRUE)
+
+# Print
+cat("KNN_Accuracy       :", round(conf_matrix$overall["Accuracy"], 4), "\n")
+cat("Macro KNN_AUC      :", round(auc_value, 4), "\n")
+cat("Macro KNN_Recall   :", round(macro_knn_recall, 4), "\n")
+cat("Macro KNN_Precision:", round(macro_knn_precision, 4), "\n")
+cat("Macro KNN_F1 Score :", round(macro_knn_f1, 4), "\n")
+
+```
+
+#### Support Vector Machine
+**Support Vector Machine (SVM)** is a powerful algorithm for classification tasks. It finds the best boundary to separate different classes. For credit card grading, SVM is suitable due to its ability to handle complex patterns.
+
+**RFE** with a custom **macro F1-score** was used to select features. This process identified **14 variables** that best support multi-class credit card classification.
+
+```{r, eval=FALSE}
+#recursive feature elimination
+library(doParallel)
+# Define macro F1-score as customised summary function
+f1_summary <- function(data, lev = NULL, model = NULL) {
+  classes <- lev
+  f1_scores <- sapply(classes, function(class) {
+    tp <- sum(data$pred == class & data$obs == class)
+    fp <- sum(data$pred == class & data$obs != class)
+    fn <- sum(data$pred != class & data$obs == class)
+    precision <- if ((tp + fp) == 0) 0 else tp / (tp + fp)
+    recall <- if ((tp + fn) == 0) 0 else tp / (tp + fn)
+    if ((precision + recall) == 0) 0 else 2 * precision * recall / (precision + recall)
+  })
+  f1_macro <- mean(f1_scores, na.rm = TRUE)
+  names(f1_macro) <- "F1"
+  return(f1_macro)
+}
+# Use rfFuncs as base and override summary function
+f1Funcs <- rfFuncs
+f1Funcs$summary <- f1_summary
+# Set up parallel backend
+cores <- 8
+registerDoParallel(cores = cores)
+# Prepare training data for RFE
+data_train <- data.frame(X_train_scaled, Credit_Score = y_train)
+# RFE control settings
+set.seed(5003)
+ctrl_f1 <- rfeControl(functions = f1Funcs, method = "cv", number = 5,
+                      verbose = TRUE, allowParallel = TRUE)
+# Run RFE to select top features based on macro F1
+rfe_result <- rfe(
+  x = data_train[, -ncol(data_train)],
+  y = data_train$Credit_Score,
+  sizes = 10:15,
+  rfeControl = ctrl_f1
+)
+# Output selected features
+print(rfe_result)
+selected_vars <- predictors(rfe_result)
+print(selected_vars)
+# Stop parallel backend
+stopImplicitCluster()
+```
+```{r}
+selected_vars <- c(
+  "Delay_from_due_date", "Num_Credit_Card", "Changed_Credit_Limit", 
+  "Total_EMI_per_month", "Outstanding_Debt", "Monthly_Inhand_Salary", 
+  "Interest_Rate", "Annual_Income", "Age", "Num_of_Delayed_Payment", 
+  "Num_Bank_Accounts", "Num_Credit_Inquiries", "Monthly_Balance", 
+  "Credit_History_Age"
+)
+# Keep only selected features
+X_train_selected <- X_train_scaled[, selected_vars]
+X_test_selected  <- X_test_scaled[, selected_vars]
+```
+
+Hyperparameters `C` and `sigma` were tuned using **five-fold cross-validated grid search**. A coarse grid was first applied to identify a rough parameter range, followed by a finer grid for improved precision. The finer grid used: `sigma = c(0.55, 0.6, 0.65)`,`C = c(1.1, 1.2, 1.3)`.
+To address **class imbalance**, **up-sampling** was applied during training. The **optimal parameters** determined from this process were `C = 1.2` and `sigma = 0.6`.
+```{r,eval=FALSE}
+set.seed(5003)
+# train SVM with cross-validation(F1)
+# Define caret training control with upsampling and macro F1
+ctrl_cv <- trainControl(method = "cv", number = 5, sampling = "up",
+                        summaryFunction = f1_summary)
+# Define parameter grid for SVM tuning
+tune_grid <- expand.grid(sigma = (0.55, 0.6, 0.65), C = c(1.1, 1.2, 1.3)) #already determined a rough range by grid search
+# Train SVM model with radial basis kernel
+svm_model <- train(
+  x = X_train_selected,
+  y = y_train,
+  method = "svmRadial",
+  trControl = ctrl_cv,
+  tuneGrid = tune_grid,
+  metric = "F1"
+)
+# Show the best model and cross-validated results
+print(svm_model)
+```
+Using the optimal parameters, the SVM model was retrained on the training set. Evaluation on the test set yielded strong performance:  
+`Macro Recall = 0.7055`, `Macro Precision = 0.7498`, `Macro F1 Score = 0.7234`, `Macro AUC = 0.8879`.  
+```{r,echo=TRUE}
+#use best params to train final model
+svm_best_params <- expand.grid(sigma = 0.6, C = 1.2)
+
+ctrl_final <- trainControl(method = "none",classProbs = TRUE)
+#train final model
+svm_final_model <- train(
+  x = X_train_selected,
+  y = y_train,
+  method = "svmRadial",
+  trControl = ctrl_final,
+  tuneGrid = svm_best_params,
+  metric = "F1"
+)
+
+# Evaluate 
+svm_y_pred <- predict(svm_final_model, newdata = X_test_selected)
+
+# Generate confusion matrix and accuracy
+svm_conf_matrix <- confusionMatrix(svm_y_pred, y_test)
+svm_conf_matrix
+
+# Extract confusion matrix table
+svm_cm_table <- svm_conf_matrix$table
+# 1. Per-class recall (sensitivity)
+svm_recall_per_class <- diag(svm_cm_table) / colSums(svm_cm_table)
+# 2. Per-class precision
+svm_precision_per_class <- diag(svm_cm_table) / rowSums(svm_cm_table)
+# 3. F1 per class
+svm_f1_per_class <- 2 * svm_precision_per_class * svm_recall_per_class / 
+                (svm_precision_per_class + svm_recall_per_class)
+#AUC 
+svm_y_prob <- predict(svm_final_model, newdata = X_test_selected, type = "prob")
+y_true <- factor(y_test, levels = colnames(svm_y_prob))
+svm_multi_roc <- multiclass.roc(response = y_true, predictor = as.matrix(svm_y_prob))
+svm_auc_value <- as.numeric(svm_multi_roc$auc)
+
+# 4. Macro averages
+macro_svm_recall <- mean(svm_recall_per_class, na.rm = TRUE)
+macro_svm_precision <- mean(svm_precision_per_class, na.rm = TRUE)
+macro_svm_f1 <- mean(svm_f1_per_class, na.rm = TRUE)
+
+```
+
+```{r}
+# Print
+cat("Macro SVM_Recall   :", round(macro_svm_recall, 4), "\n")
+cat("Macro SVM_Precision:", round(macro_svm_precision, 4), "\n")
+cat("Macro SVM_F1 Score :", round(macro_svm_f1, 4), "\n")
+cat("Macro SVM_AUC      :", round(svm_auc_value, 4), "\n")
+```
+
+
+
+## Performance Evaluation
+```{r confusion_matrices,fig.width=15, fig.height=8}
+# Load required libraries
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(tidyr)
+
+# Define a common theme function for optimized display
+theme_confusion <- function() {
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    plot.margin = unit(c(20, 20, 20, 20), "pt")
+  )
+}
+
+# SVM confusion matrix data
+svm_cm <- matrix(c(404, 15, 122,
+                   4, 889, 239,
+                   232, 287, 1808), nrow = 3, byrow = TRUE)
+colnames(svm_cm) <- c("Good", "Poor", "Standard")
+rownames(svm_cm) <- c("Good", "Poor", "Standard")
+svm_df <- as.data.frame(svm_cm)
+svm_df$Prediction <- rownames(svm_cm)
+svm_df <- tidyr::pivot_longer(svm_df, cols = c("Good", "Poor", "Standard"), 
+                              names_to = "Reference", values_to = "Value")
+svm_fig <- ggplot(svm_df, aes(x = Reference, y = Prediction, fill = Value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Value), vjust = 0.5, size = 4) +
+  scale_fill_gradient(low = "#D3D3D3", high = "#EA7B30") +
+  theme_confusion()
+
+# KNN confusion matrix data
+knn_cm <- matrix(c(657, 137, 358,
+                   45, 1456, 605,
+                   567, 801, 3345), nrow = 3, byrow = TRUE)
+colnames(knn_cm) <- c("Good", "Poor", "Standard")
+rownames(knn_cm) <- c("Good", "Poor", "Standard")
+knn_df <- as.data.frame(knn_cm)
+knn_df$Prediction <- rownames(knn_cm)
+knn_df <- tidyr::pivot_longer(knn_df, cols = c("Good", "Poor", "Standard"), 
+                              names_to = "Reference", values_to = "Value")
+knn_fig <- ggplot(knn_df, aes(x = Reference, y = Prediction, fill = Value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Value), vjust = 0.5, size = 4) +
+  scale_fill_gradient(low = "#D3D3D3", high = "#EA7B30") +
+  theme_confusion()
+
+# MLR confusion matrix data
+mlr_cm <- matrix(c(685, 123, 416,
+                   30, 1412, 603,
+                   554, 859, 3289), nrow = 3, byrow = TRUE)
+colnames(mlr_cm) <- c("Good", "Poor", "Standard")
+rownames(mlr_cm) <- c("Good", "Poor", "Standard")
+mlr_df <- as.data.frame(mlr_cm)
+mlr_df$Prediction <- rownames(mlr_cm)
+mlr_df <- tidyr::pivot_longer(mlr_df, cols = c("Good", "Poor", "Standard"), 
+                              names_to = "Reference", values_to = "Value")
+mlr_fig <- ggplot(mlr_df, aes(x = Reference, y = Prediction, fill = Value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Value), vjust = 0.5, size = 4) +
+  scale_fill_gradient(low = "#D3D3D3", high = "#EA7B30") +
+  theme_confusion()
+
+# QDA confusion matrix data
+qda_cm <- matrix(c(15474, 2637, 4171,
+                   410, 12849, 3679,
+                   1352, 1750, 9386), nrow = 3, byrow = TRUE)
+colnames(qda_cm) <- c("Good", "Poor", "Standard")
+rownames(qda_cm) <- c("Good", "Poor", "Standard")
+qda_df <- as.data.frame(qda_cm)
+qda_df$Prediction <- rownames(qda_cm)
+qda_df <- tidyr::pivot_longer(qda_df, cols = c("Good", "Poor", "Standard"), 
+                              names_to = "Reference", values_to = "Value")
+qda_fig <- ggplot(qda_df, aes(x = Reference, y = Prediction, fill = Value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Value), vjust = 0.5, size = 4) +
+  scale_fill_gradient(low = "#D3D3D3", high = "#EA7B30") +
+  theme_confusion()
+
+# XGBoost confusion matrix data (keeping original values)
+xgb_cm <- matrix(c(
+  842,  37, 271,
+    8, 1839, 523,
+  419, 518, 3514
+), nrow = 3, byrow = TRUE)
+colnames(xgb_cm) <- c("Good", "Poor", "Standard")
+rownames(xgb_cm) <- c("Good", "Poor", "Standard")
+xgb_df <- as.data.frame(xgb_cm)
+xgb_df$Prediction <- rownames(xgb_cm)
+xgb_df <- tidyr::pivot_longer(xgb_df, cols = c("Good", "Poor", "Standard"), 
+                              names_to = "Reference", values_to = "Value")
+xgb_fig <- ggplot(xgb_df, aes(x = Reference, y = Prediction, fill = Value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Value), vjust = 0.5, size = 4) +
+  scale_fill_gradient(low = "#D3D3D3", high = "#EA7B30") +
+  theme_confusion()
+
+# Change 2x3 layout to 3x2 layout
+print(grid.arrange(
+  arrangeGrob(svm_fig, top = textGrob("SVM", gp = gpar(fontsize = 14))),
+  arrangeGrob(knn_fig, top = textGrob("KNN", gp = gpar(fontsize = 14))),
+  arrangeGrob(mlr_fig, top = textGrob("MLR", gp = gpar(fontsize = 14))),
+  arrangeGrob(qda_fig, top = textGrob("QDA", gp = gpar(fontsize = 14))),
+  arrangeGrob(xgb_fig, top = textGrob("XGBoost", gp = gpar(fontsize = 14))),
+  ncol = 3, nrow = 2
+))
+```
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(tidyr)
+
+# Create a data frame with macro metrics for all models
+metrics_data <- data.frame(
+  Metric = c("Macro Recall", "Macro Precision", "Macro F1", "Macro AUC"),
+  SVM = c(0.7055, 0.7498, 0.7234, 0.8879),
+  KNN = c(0.6341, 0.6571, 0.6438, 0.8321),
+  MLR = c(0.6310, 0.6499, 0.6386, 0.8320),
+  QDA = c(0.7293, 0.7349, 0.7222, 0.8556),
+  XGBoost = c(0.8709, 0.8677, 0.8692, 0.9085)
+)
+
+# Reshape data: one row per Metric-Model pair
+metrics_long <- pivot_longer(metrics_data, cols = -Metric,
+                             names_to = "Model", values_to = "Value")
+
+# Define model color palette
+model_colors <- c(
+  "SVM" = "#c7522a",
+  "KNN" = "#e5c185",
+  "MLR" = "#fbf2c4",
+  "QDA" = "#74a892",
+  "XGBoost" = "#008585"
+)
+
+# Plot: Metric on x-axis, each model is a bar group
+ggplot(metrics_long, aes(x = Metric, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  scale_fill_manual(values = model_colors) +
+  theme_minimal() +
+  labs(title = "Comparison of Macro Metrics Across Models", x = "Metric", y = "Value") +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
+```
+
