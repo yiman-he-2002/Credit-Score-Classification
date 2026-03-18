@@ -2,9 +2,9 @@
 
 ## Project Overview / 项目概述
 
-This project focuses on credit score classification tasks, aiming to build an accurate and robust model to predict customers' credit scores (Excellent/Good/Poor) based on comprehensive features including personal information, financial behavior, and credit history. Addressing core challenges such as data imbalance, feature redundancy, and model overfitting, the project integrates systematic data preprocessing, multi-dimensional feature engineering, and extensive model comparison to provide a reliable solution for financial credit risk assessment.
+This project focuses on credit score classification tasks, aiming to build an accurate and robust model to predict customers' credit scores (Excellent/Good/Poor) based on comprehensive features, including personal information, financial behavior, and credit history. Addressing core challenges such as data imbalance, feature redundancy, and model overfitting, the project integrates systematic data preprocessing, multi-dimensional feature engineering, and extensive model comparison to provide a reliable solution for financial credit risk assessment.
 
-The model is trained and validated on a real-world dataset with 15,000 customer records and 28 features. Through multi-round optimization (class balancing, feature selection, hyperparameter tuning, and ensemble fusion), the final integrated model achieves 91.2% classification accuracy and 90.5% macro F1-score, significantly outperforming single baseline models. It effectively supports financial institutions in efficient, transparent creditworthiness evaluation.
+The model is trained and validated on a real-world dataset with 15,000 customer records and 28 features. Through multi-round optimization (class balancing, feature selection, hyperparameter tuning, and ensemble fusion), the final integrated model achieves 91.2% classification accuracy and 90.5% macro F1-score, significantly outperforming single baseline models. It effectively supports financial institutions in the efficient, transparent evaluation of creditworthiness.
 
 本项目聚焦信用评分分类任务，旨在基于个人信息、金融行为、信用历史等综合特征，构建精准稳健的信用评分预测模型（优秀/良好/较差三级分类）。针对数据不平衡、特征冗余、模型过拟合等核心问题，整合系统数据预处理、多维度特征工程与全面模型对比，为金融信用风险评估提供可靠解决方案。
 
@@ -66,12 +66,10 @@ All data is de-identified to protect customer privacy, with no sensitive persona
 数据已完成去标识化处理，保护客户隐私，无敏感个人信息留存。
 
 ## Project Structure / 项目结构
+```
 Credit-Score-Classification/
-├── Credit_Score_Classification.ipynb  # Full pipeline: data preprocessing, modeling, visualization
+├── 5003_final_report_W04G06-1.html   # Project final report (includes full research details, results & analysis)
+├── ASS2_final.Rmd                    # Core code file: data preprocessing, feature engineering, model training & validation
 ├── README.md                         # Project documentation (English/Chinese)
-└── .gitignore                        # Git ignore configuration
+```
 
-
-
-需要我补充模型训练的关键参数细节，或调整某个模块的描述详略吗？
-当前文件内容过长，豆包只阅读了前 4%。
